@@ -318,6 +318,7 @@ class _BrowserAccountPageState extends State<BrowserAccountPage>
         // Another tab ended this sign-in: show the skeleton, and make any
         // overview request already in flight land nowhere.
         revision++;
+        workspace.resetSources();
         setState(() {
           resetIdentity();
           securityInfo = null;
@@ -687,6 +688,7 @@ class _BrowserAccountPageState extends State<BrowserAccountPage>
     }
     if (sessionOwner != owner || sessionKey != sid) {
       // Another account or another sign-in: nothing from before may show.
+      workspace.resetSources();
       cachedProfile = null;
       overview = null;
       overviewAttempted = false;
@@ -1848,6 +1850,7 @@ class _BrowserAccountPageState extends State<BrowserAccountPage>
                     ),
                     SettingsCategory.devices: devicesPage(),
                     SettingsCategory.sources: SourceSettings(
+                      key: ValueKey((sessionOwner, sessionKey)),
                       controller: workspace,
                       onOpenAccount: () =>
                           navigated(SettingsCategory.account.route),

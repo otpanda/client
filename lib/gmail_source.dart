@@ -56,11 +56,16 @@ class GmailSourceConnect extends StatefulWidget {
 
   /// True only when the account's own source list holds a Gmail source.
   final bool hasGmailSource;
+
+  /// The owning Sources view has a current confirmed snapshot. Status alone
+  /// does not establish which mailboxes are already connected.
+  final bool sourceStateKnown;
   const GmailSourceConnect({
     super.key,
     required this.bridge,
     this.onOpenAccount,
     this.hasGmailSource = false,
+    this.sourceStateKnown = true,
   });
   @override
   State<GmailSourceConnect> createState() => _GmailSourceConnectState();
@@ -245,6 +250,7 @@ class _GmailSourceConnectState extends State<GmailSourceConnect>
   }
 
   Future<void> connect() async {
+    if (!widget.sourceStateKnown) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -267,7 +273,7 @@ class _GmailSourceConnectState extends State<GmailSourceConnect>
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !mounted || !widget.sourceStateKnown) return;
     setState(() {
       busy = true;
       error = '';
@@ -351,7 +357,7 @@ class _GmailSourceConnectState extends State<GmailSourceConnect>
             Padding(
               padding: const EdgeInsets.only(top: 12),
               child: FilledButton(
-                onPressed: busy || blocked
+                onPressed: busy || blocked || !widget.sourceStateKnown
                     ? null
                     : passkey
                     ? widget.onOpenAccount
@@ -421,8 +427,7 @@ class _GmailSourceDisconnectState extends State<GmailSourceDisconnect> {
     if (!mounted) return;
     if (cap == null || !cap.disconnectPolicy) {
       setState(
-        () => error =
-            'Could not check how saved matching rules are handled. Gmail is still connected. Try again.',
+        () => error = 'Could not check how saved matching rules are handled. Gmail is still connected. Try again.',
       );
       return;
     }

@@ -45,6 +45,127 @@ class ReadWorkspaceController extends ChangeNotifier {
   ReadWorkspaceController({required this.bridge, int Function()? clock})
     : clock = clock ?? (() => DateTime.now().millisecondsSinceEpoch);
 
+  // A Sources settings read stays separate from the suspended code workspace.
+  // No socket or code/inbox reads are started by this view.
+  List<PrivateSource>? _settingsSources;
+  bool _sourcesUseWorkspace = true;
+  List<PrivateSource> get settingsSources =>
+      _settingsSources ?? (_sourcesUseWorkspace ? store.sources : const []);
+  bool get sourcesLoaded =>
+      _settingsSources != null || (_sourcesUseWorkspace && hasLoaded);
+  bool sourcesLoading = false;
+  String sourcesMessage = '';
+  bool _sourcesActive = false, _sourcesAgain = false;
+  int _sourcesEpoch = 0, _sourcesFailures = 0;
+  Timer? _sourcesRetry;
+
+  void showSources() {
+    if (_disposed || _sourcesActive) return;
+    _sourcesActive = true;
+    unawaited(refreshSources());
+  }
+
+  void hideSources() {
+    _sourcesActive = false;
+    ++_sourcesEpoch;
+    sourcesLoading = false;
+    _sourcesAgain = false;
+    _sourcesRetry?.cancel();
+    _sourcesRetry = null;
+  }
+
+  Future<void> refreshSources() async {
+    if (_disposed || !_sourcesActive || !signedIn) return;
+    if (sourcesLoading) {
+      _sourcesAgain = true;
+      return;
+    }
+    _sourcesRetry?.cancel();
+    _sourcesRetry = null;
+    final epoch = ++_sourcesEpoch;
+    sourcesLoading = true;
+    sourcesMessage = '';
+    _notify();
+    bool current() => !_disposed && _sourcesActive && epoch == _sourcesEpoch;
+    try {
+      final response = await bridge.read('/v1/manage/sources');
+      if (!current()) return;
+      if (!signedIn) {
+        clear();
+        return;
+      }
+      if (response.status != 200) {
+        throw ClientFailure(response.status, response.retryAfterSeconds);
+      }
+      final body = jsonDecode(response.body);
+      final rows = body is Map<String, dynamic> ? body['sources'] : null;
+      if (rows is! List || rows.length > 100) {
+        throw const FormatException('Invalid sources');
+      }
+      final sources = rows
+          .map((row) {
+            if (row is! Map<String, dynamic>) {
+              throw const FormatException('Invalid source');
+            }
+            return row;
+          })
+          .where((row) => row['revoked_at'] == null)
+          .map(PrivateSource.fromJson)
+          .toList();
+      if (sources.map((source) => source.id).toSet().length != sources.length) {
+        throw const FormatException('Duplicate source');
+      }
+      if (_sourcesAgain) return;
+      _settingsSources = List.unmodifiable(sources);
+      _sourcesFailures = 0;
+    } catch (error) {
+      if (!current()) return;
+      if (error is ClientFailure && error.signedOut) {
+        clear();
+        sessionEnded = true;
+        bridge.clear();
+        _notify();
+        return;
+      }
+      if (_sourcesAgain) return;
+      sourcesMessage = error is ClientFailure && error.status == 429
+          ? 'Too many requests. Sources will retry automatically.'
+          : 'Could not load sources. Updates will retry automatically.';
+      // Same failed-read backoff as the workspace: 15s, 30s, then 60s,
+      // respecting Retry-After up to five minutes. Only while this view is active.
+      _sourcesFailures++;
+      final delay = 15000 * (1 << (_sourcesFailures - 1).clamp(0, 2));
+      final header = error is ClientFailure
+          ? (error.retryAfterSeconds ?? 0).clamp(0, 300) * 1000
+          : 0;
+      _sourcesRetry = Timer(
+        Duration(milliseconds: header > delay ? header : delay),
+        () {
+          _sourcesRetry = null;
+          if (current()) unawaited(refreshSources());
+        },
+      );
+    } finally {
+      if (current()) {
+        sourcesLoading = false;
+        _notify();
+        if (_sourcesAgain) {
+          _sourcesAgain = false;
+          unawaited(refreshSources());
+        }
+      }
+    }
+  }
+
+  /// Discard only the settings snapshot when the parent confirms a new identity.
+  void resetSources() {
+    hideSources();
+    _sourcesUseWorkspace = false;
+    _settingsSources = null;
+    sourcesMessage = '';
+    _sourcesFailures = 0;
+  }
+
   /// Shared best-effort duplicate keys from the current owned TOTP snapshot.
   Set<(String?, String)> get importDuplicateKeys => {
     for (final e in store.entries)
@@ -252,6 +373,7 @@ class ReadWorkspaceController extends ChangeNotifier {
         store = staged;
         publishedRevision++;
         hasLoaded = true;
+        _sourcesUseWorkspace = true;
         _cancelReadRetry();
       }
     } on ClientFailure catch (error) {
@@ -310,6 +432,7 @@ class ReadWorkspaceController extends ChangeNotifier {
   }
 
   void clear() {
+    resetSources();
     mutationUpdating = false;
     ++_epoch;
     loading = false;
@@ -344,6 +467,8 @@ class ReadWorkspaceController extends ChangeNotifier {
   }
 
   void resume() {
+    hideSources();
+    _settingsSources = null;
     if (_disposed) return;
     suspended = false;
     if (bridge is SessionContinuityBridge) {
@@ -380,6 +505,7 @@ class ReadWorkspaceController extends ChangeNotifier {
 
   @override
   void dispose() {
+    hideSources();
     _stopRealtime();
     _cancelReadRetry();
     _disposed = true;
